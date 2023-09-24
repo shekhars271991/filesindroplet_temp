@@ -1,0 +1,60 @@
+const express = require('express');
+const router = express.Router();
+const upload = require("./helper/upload");
+
+global.__basedir = __dirname;
+
+const capacityController = require('./controllers/capacity-controller');
+const accountController = require('./controllers/account-controller');
+const entitlementController = require('./controllers/entitlement-controller');
+const requisitionController = require('./controllers/requisition-controller');
+const provisionalController = require('./controllers/provisional-controller');
+const planController = require('./controllers/plan-controller');
+
+const bcController = require('./controllers/blockchain-ops-controller');
+
+
+// const requisitionController = require('./controllers/requisitions-controller');
+
+
+router.post("/authenticate", accountController.authenticate);
+router.get("/plan", planController.getPlanData);
+router.get("/plan/updatePlan", planController.updatePlan);
+router.get("/isgs/capacity", capacityController.get);
+router.get("/isgs/entitlements", entitlementController.getISGSEntitlements);
+
+router.post("/isgs/capacity", upload.single("capacity_file"), capacityController.createCapacity);
+router.put("/isgs/capacity/publish", capacityController.publish);
+router.post("/isgs/capacity/revision", upload.single("capacity_revision_file"), capacityController.createDispatch);
+router.put("/isgs/capacity/revision", capacityController.publishRevision);
+
+router.get("/sldc/entitlements", entitlementController.getSLDCEntitlements);
+router.post("/sldc/requisitions", upload.single("requisition_file"), requisitionController.uploadRequisitions);
+router.get("/sldc/requisitions/publish", requisitionController.publish);
+router.post("/sldc/requisitions/revision", upload.single("requisition_revision_file"), requisitionController.uploadRequisitionRevision);
+router.put("/sldc/requisitions/revision", requisitionController.publishRevision);
+
+router.post("/entitlement", upload.single("entitlement_file"), entitlementController.entitlementUpload);
+router.get("/entitlement", entitlementController.getAllocatedEntitlements);
+router.get("/rldc/entitlements/calculate", entitlementController.calculateEntitlements);
+router.get("/rldc/entitlements/publish", entitlementController.publish);
+router.get("/rldc/provisional/calculate", provisionalController.calculateProvisionalSchedule);
+router.put("/rldc/provisional/publish", provisionalController.publish);
+router.get("/rldc/finalschedule/calculate", provisionalController.calculateFinalSchedule);
+router.put("/rldc/finalschedule/publish", provisionalController.publishFinalSchedule);
+
+
+
+router.get("/blockchain/txn", bcController.getBCTxns);
+router.post("/blockchain/txn", bcController.createBCTxn);
+// router.get("/rldc/requisition", requisitionController.get);
+
+router.get('/', (req, res) => {
+  res.json({
+    message: 'API - 👋🌎🌍🌏'
+  });
+});
+
+//router.use('/emojis', emojis);
+
+module.exports = router;

@@ -1,0 +1,103 @@
+const db = require("../config/db");
+
+const getAllOrgByType = async function(orgType) {
+    return await db.query("select up.id as user_id, o.name from organizations o \
+     JOIN org_types_pl ot ON o.org_type = ot.id \
+     JOIN user_profiles up ON up.organization = o.id WHERE ot.name = '" + orgType + "'");
+}
+
+const getEntitlementsFor = async function(sldc, isgs) {
+    return await await db.query("SELECT time_block, time_description, entitled_power FROM dgmsdb.entitlements en \
+    JOIN time_slots ts ON en.time_block = ts.id \
+    JOIN user_profiles ups ON en.sldc_id = ups.id \
+    JOIN organizations o ON ups.organization = o.id \
+    JOIN user_profiles upi ON en.isgs_id = upi.id \
+    JOIN organizations oi ON upi.organization = oi.id \
+    WHERE o.name = '" + sldc + "' and oi.name='" + isgs + "';");
+}
+
+const getRequisitionsFor = async function(sldc, isgs) {
+    return await db.query("SELECT time_block, time_description, requisitioned_power FROM requisitions rq \
+    JOIN time_slots ts ON rq.time_block = ts.id \
+    JOIN user_profiles ups ON rq.sldc_id = ups.id \
+    JOIN organizations o ON ups.organization = o.id \
+    JOIN user_profiles upi ON rq.isgs_id = upi.id \
+    JOIN organizations oi ON upi.organization = oi.id \
+    WHERE o.name = '" + sldc + "' and oi.name='" + isgs + "';");
+}
+
+const getActiveRequisitionsAndEntitlements = async() => {
+    var sldcOrgs = await getAllOrgByType('SLDC');
+    var isgsOrgs = await getAllOrgByType('ISGS');
+    console.log(sldcOrgs);
+    console.log(isgsOrgs);
+    var response = {requisitions:{},entitlements:{}};
+    for(var si = 0; si < sldcOrgs.length; si++) {
+        for(var ii = 0; ii < isgsOrgs.length; ii++) {
+            var requisitionData = await getRequisitionsFor(sldcOrgs[si].name , isgsOrgs[ii].name);
+            var entitlementData = await getEntitlementsFor(sldcOrgs[si].name , isgsOrgs[ii].name);
+            if(response.requisitions[sldcOrgs[si].name] === undefined) response.requisitions[sldcOrgs[si].name] = {};
+            response.requisitions[sldcOrgs[si].name][isgsOrgs[ii].name] = requisitionData;
+            if(response.entitlements[sldcOrgs[si].name] === undefined) response.entitlements[sldcOrgs[si].name] = {};
+            response.entitlements[sldcOrgs[si].name][isgsOrgs[ii].name] = entitlementData;
+        }
+    }
+    return response;
+}
+
+const getDeclaredCapacity = async (plan_id) => {
+        var transactions = await db.query("SELECT user_id, max(version) as version FROM user_txns WHERE plan_id=" + plan_id + " and txn_status = 2 group by user_id");
+        
+        if(transactions.length == 0) {
+            res.status(404);
+            res.send({message:'No published capacity found for the date.'});
+            return ;
+        }
+        const capacity = {};
+        for(var index = 0; index < transactions.length; index++ ) {
+            var userAccount = await db.query(" \
+            SELECT up.id, full_name, ur.name as role, ot.name as org_type, o.name as org_name FROM user_profiles up \
+            JOIN user_roles_pl ur ON up.role = ur.id \
+            JOIN organizations o ON o.id = up.organization \
+            JOIN org_types_pl ot ON ot.id = o.org_type \
+            WHERE up.id =" + transactions[index].user_id);
+
+            userAccount = userAccount[0];
+            console.log(userAccount);
+            var blocks = await db.query("SELECT dc.*, ts.time_description FROM declared_capacity dc JOIN user_txns ut ON dc.txn_id = ut.id \
+            JOIN time_slots ts ON ts.id = dc.time_block \
+            WHERE plan_id=" + plan_id + " and version = " + transactions[index].version);
+
+            capacity[userAccount['org_name']] = blocks;
+        }
+        return capacity;
+}
+
+const getRequisitions = async (req, res) => {
+    let response = {};
+    if(req.user.org_type == "RLDC") {
+        if(req.query.action_date == undefined || req.query.action_date == null || req.query.action_date == "")
+            req.query.action_date = new Date().getFullYear() + "-" + (new Date().getMonth() + 1) + "-" + (new Date().getDate());
+            const plan = await db.query("select * from distribution_plans WHERE plan_date='" + req.query.action_date + "'");
+
+        if(plan.length == 0) {
+            res.status(404);
+            return res.send({status: '404', data:[], message:"isgs yet to upload capcity sheet."});
+        }
+        console.log("plan--",plan[0])
+        if(plan[0].plan_stage === 4) {
+            response = await getActiveRequisitionsAndEntitlements();
+            response.capacity = await getDeclaredCapacity(plan[0].id);
+            response.plan= {
+                plan_id: plan[0].id,
+                plan_stage: plan[0].plan_stage,
+                plan_date: plan[0].plan_date
+            }
+        }
+    }    
+    res.send(response);
+}
+
+module.exports = {
+  get: getRequisitions,
+};

@@ -1,0 +1,198 @@
+ const path = require("path");
+var mysql = require('mysql');
+const fs = require('fs');
+var XLSX = require('xlsx');
+
+const TransactionType = require('../constants/transaction-types');
+const db = require('../config/db');
+
+const calculateProvisionalSchedule =  async (req, res) => {
+ 
+    if(req.user.org_type != "RLDC") {
+        res.status(403);
+        res.send({message: "User is not an RLDC user to perform this operation."});
+        return ;
+    }
+
+    let result = await db.query("SELECT * FROM distribution_plans WHERE id = " + mysql.escape(req.query.plan_id));
+    var plan_id = 0;
+    if(result.length == 0) {
+        res.status(400);
+        res.send({message: "Invalid plan id."});
+        return ;
+    }
+    else
+        plan_id = result[0].id;
+
+        
+    result = await db.query("SELECT * FROM user_txns WHERE plan_id = " + plan_id + " and user_id=" + req.user.user_id + " and txn_type=" + TransactionType.PROVISIONAL);
+
+    lastVersion = 0;
+    if(result.length > 0 ) {
+        
+        result = await db.query("SELECT max(version) as version FROM user_txns WHERE plan_id=" + plan_id + " and user_id=" + req.user.user_id + " and txn_type=" + TransactionType.PROVISIONAL);
+        lastVersion = result[0].version;
+    
+    }
+
+    data = {
+        user_id : req.user.user_id,
+        plan_id : plan_id,
+        txn_type : TransactionType.PROVISIONAL,
+        txn_source : 1,
+        txn_base64 : null,
+        version : lastVersion + 1,
+        action_timestamp: new Date(),
+        txn_status: 1
+    }
+
+    result = await db.query("INSERT INTO user_txns SET ?", data);
+    var txn_id = result.insertId;
+    try {
+		
+			result_pro = await db.query("INSERT INTO provisional_schedules (txn_id, time_block, sldc_id, isgs_id, energy, updatedby, updatedts, softdeleteflag) \
+			SELECT " + txn_id + ", r.time_block, r.sldc_id, r.isgs_id, \
+			CASE \
+			WHEN r.requisitioned_power > entitled_power THEN entitled_power \
+			WHEN r.requisitioned_power < entitled_power THEN r.requisitioned_power \
+			ELSE r.requisitioned_power \
+			END as energy, " + req.user.user_id + ", now(), 0 \
+			FROM requisitions r \
+			JOIN user_txns utr ON r.txn_id  = utr.id \
+			JOIN entitlements et ON et.time_block = r.time_block AND et.sldc_id = r.sldc_id AND et.isgs_id = r.isgs_id \
+			JOIN user_txns ute ON et.txn_id = ute.id \
+			WHERE utr.txn_status = 2 AND ute.txn_status = 2 AND utr.plan_id = " + plan_id + " AND ute.plan_id = " + plan_id) ;
+  
+            //res.send({staus:result_pro.insertId});    
+            }
+            catch (err) {
+                res.send({staus:err});    
+			}				
+    
+	res.send({staus:'Yes', message: 'provisional schedule calculated.'});
+};
+
+
+const calculateFinalSchedule =  async (req, res) => {
+ 
+    if(req.user.org_type != "RLDC") {
+        res.status(403);
+        res.send({message: "User is not an RLDC user to perform this operation."});
+        return ;
+    }
+
+    let result = await db.query("SELECT * FROM distribution_plans WHERE id = " + mysql.escape(req.query.plan_id));
+    var plan_id = 0;
+    if(result.length == 0) {
+        res.status(400);
+        res.send({message: "Invalid plan id."});
+        return ;
+    }
+    else
+        plan_id = result[0].id;
+
+        
+    result = await db.query("SELECT * FROM user_txns WHERE plan_id = " + plan_id + " and user_id=" + req.user.user_id + " and txn_type=" + TransactionType.FINAL);
+
+    lastVersion = 0;
+    if(result.length > 0 ) {
+        
+        result = await db.query("SELECT max(version) as version FROM user_txns WHERE plan_id=" + plan_id + " and user_id=" + req.user.user_id + " and txn_type=" + TransactionType.FINAL);
+        lastVersion = result[0].version;
+    
+    }
+
+    data = {
+        user_id : req.user.user_id,
+        plan_id : plan_id,
+        txn_type : TransactionType.FINAL,
+        txn_source : 1,
+        txn_base64 : null,
+        version : lastVersion + 1,
+        action_timestamp: new Date(),
+        txn_status: 1
+    }
+
+    result = await db.query("INSERT INTO user_txns SET ?", data);
+    var txn_id = result.insertId;
+
+    result = await db.query("INSERT INTO final_schedule (txn_id, time_block, sldc_id, isgs_id, energy, updatedby, updatedts, softdeleteflag) \
+    SELECT ps.time_block, ps.sldc_id, ps.isgs_id, \
+    CASE  \
+    WHEN rr.energy IS NOT NULL AND ps.energy > rr.energy THEN rr.energy \
+    WHEN rr.energy IS NOT NULL AND ps.energy < rr.energy THEN ps.energy \
+    ELSE ps.energy END as energy, " + req.user.user_id + ", now(), 0 \
+    FROM provisional_schedules ps \
+    JOIN user_txns utp ON ps.txn_id  = utp.id and utp.txn_status = 2 AND utp.plan_id = " + plan_id + " \
+    LEFT JOIN  \
+    (requisition_revisions rr INNER JOIN user_txns utrr ON utrr.id = rr.txn_id AND utrr.txn_status = 2  AND utrr.plan_id = " + plan_id + ") \
+    ON ps.time_block = rr.time_block AND ps.sldc_id = rr.sldc_id AND ps.isgs_id = rr.isgs_id" );
+    
+    res.send({message: 'Final schedule calculated.'});
+};
+
+const publish = async function(req, res) {
+
+    if(req.user.org_type != "RLDC") {
+        res.status(403);
+        res.send({message: "User is not an RLDC user to publish provisional."});
+        return ;
+    }
+
+    var user_id = req.user.user_id;
+    var result = await db.query("SELECT * FROM user_txns WHERE plan_id = " + req.query.plan_id + " AND txn_type=" + TransactionType.PROVISIONAL + " and user_id=" + req.user.user_id);
+
+    if(result.length == 0 ) {
+        res.status(400);
+        res.send({message:"Invalid plan id."});
+        return ;
+    }
+
+    if(result[0].user_id != user_id) {
+        res.status(403);
+        res.send({message:"The provisional data is not uploaded by this user so cannot publish it."});
+        return ;
+    }
+
+    result = await db.query("UPDATE user_txns SET txn_status = 2 WHERE plan_id = " + req.query.plan_id + " AND txn_type=" + TransactionType.PROVISIONAL + " and user_id=" + req.user.user_id);
+    console.log(result);
+    res.send({message: "Provisional is published."});
+    
+
+}
+
+const publishFinalSchedule = async function(req, res) {
+
+    if(req.user.org_type != "RLDC") {
+        res.status(403);
+        res.send({message: "User is not an RLDC user to publish final schedule."});
+        return ;
+    }
+
+    var user_id = req.user.user_id;
+    var result = await db.query("SELECT * FROM user_txns WHERE plan_id = " + req.query.plan_id + " AND txn_type=" + TransactionType.FINAL + " and user_id=" + req.user.user_id);
+
+    if(result.length == 0 ) {
+        res.status(400);
+        res.send({message:"Invalid plan id."});
+        return ;
+    }
+
+    if(result[0].user_id != user_id) {
+        res.status(403);
+        res.send({message:"The final schedule data is not calculated by this user so cannot publish it."});
+        return ;
+    }
+
+    result = await db.query("UPDATE user_txns SET txn_status = 2 WHERE plan_id = " + req.query.plan_id + " AND txn_type=" + TransactionType.FINAL + " and user_id=" + req.user.user_id);
+    console.log(result);
+    res.send({message: "Final schedule is published."});
+    
+
+}
+module.exports = {
+    calculateProvisionalSchedule: calculateProvisionalSchedule,
+    publish:publish,
+    calculateFinalSchedule: calculateFinalSchedule,
+    publishFinalSchedule: publishFinalSchedule
+}
